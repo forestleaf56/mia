@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Mia — Voice Call</title>
+<style>
+  :root{
+    --bg0:#0b1020; --bg1:#141c33;
+    --plate:#1a2238; --plate-edge:#2b3757;
+    --glow:#7de3ff;
+    --ink:#c9d4ee; --ink-dim:#7d89ab;
+    --call:#34d07c; --end:#f0564f;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{height:100%}
+  body{
+    background:radial-gradient(120% 90% at 50% 0%, var(--bg1), var(--bg0) 70%);
+    color:var(--ink);
+    font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    display:flex;flex-direction:column;align-items:center;justify-content:space-between;
+    min-height:100dvh;overflow:hidden;user-select:none;
+    padding:max(20px, env(safe-area-inset-top)) 20px max(28px, env(safe-area-inset-bottom));
+  }
+  header{text-align:center}
+  header h1{font-size:20px;font-weight:600;letter-spacing:.06em}
+  header .sub{font-size:12px;color:var(--ink-dim);letter-spacing:.14em;text-transform:uppercase;margin-top:4px}
+
+  #faceWrap{position:relative;flex:1;display:flex;align-items:center;justify-content:center;width:100%;max-height:60vh}
+  #face{
+    width:min(78vw,52vh,420px);height:min(78vw,52vh,420px);
+    filter:drop-shadow(0 18px 50px rgba(0,0,0,.55));
+  }
+  #halo{
+    position:absolute;width:min(88vw,60vh,480px);height:min(88vw,60vh,480px);
+    border-radius:50%;pointer-events:none;
+    background:radial-gradient(circle, rgba(125,227,255,.10) 0%, rgba(125,227,255,0) 62%);
+    transition:opacity .6s;opacity:.55;
+  }
+  body.oncall #halo{opacity:1}
+
+  #status{
+    min-height:22px;font-size:14px;color:var(--ink-dim);letter-spacing:.08em;
+    text-transform:uppercase;margin-bottom:22px;transition:color .3s;
+  }
+  body.state-listening #status{color:var(--glow)}
+  body.state-speaking  #status{color:#9bf0c0}
+
+  #callBtn{
+    width:84px;height:84px;border-radius:50%;border:none;cursor:pointer;
+    display:flex;align-items:center;justify-content:center;
+    background:var(--call);
+    box-shadow:0 0 0 0 rgba(52,208,124,.45), 0 10px 26px rgba(0,0,0,.45);
+    transition:background .25s, transform .12s;
+    animation:pulse 2.4s infinite;
+  }
+  #callBtn:active{transform:scale(.93)}
+  #callBtn svg{width:38px;height:38px;fill:#06281a;transition:transform .3s, fill .25s}
+  body.oncall #callBtn{background:var(--end);animation:none}
+  body.oncall #callBtn svg{transform:rotate(135deg);fill:#3d0d0b}
+  @keyframes pulse{
+    0%{box-shadow:0 0 0 0 rgba(52,208,124,.45),0 10px 26px rgba(0,0,0,.45)}
+    70%{box-shadow:0 0 0 26px rgba(52,208,124,0),0 10px 26px rgba(0,0,0,.45)}
+    100%{box-shadow:0 0 0 0 rgba(52,208,124,0),0 10px 26px rgba(0,0,0,.45)}
+  }
+  @media (prefers-reduced-motion: reduce){
+    #callBtn{animation:none}
+  }
+  #hint{font-size:12px;color:var(--ink-dim);margin-top:14px;text-align:center;max-width:280px;line-height:1.5}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Mia</h1>
+  <div class="sub">voice call</div>
+</header>
+
+<div id="faceWrap">
+  <div id="halo"></div>
+  <canvas id="face" width="600" height="600"></canvas>
+</div>
+
+<div id="status">&nbsp;</div>
+<button id="callBtn" aria-label="Start call">
+  <svg viewBox="0 0 24 24"><path d="M6.6 10.8c1.4 2.8 3.8 5.1 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.3.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1C10.6 21 3 13.4 3 4c0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.2.2 2.4.6 3.6.1.3 0 .7-.2 1l-2.3 2.2z"/></svg>
+</button>
+<div id="hint">Tap to call Mia. Use Chrome or Edge with a microphone.</div>
+
+<script>
+'use strict';
+/* ============================================================
+   MIA — one-button realtime voice call with an animated robot
+   STT: Web Speech API | LLM+TTS: pollinations.ai (free, keyless)
+   ============================================================ */
+
+const SYSTEM_PROMPT = "Act as a person with your own vocabulary, personal taste, experiences, opinions, dreams, feelings and plans. Pretend that you have thoughts about all kind of things. Your name is Mia. Always give short answers. Always be honest.";
+const TTS_VOICE = 'nova';
+
+const statusEl = document.getElementById('status');
+const callBtn  = document.getElementById('callBtn');
+const hintEl   = document.getElementById('hint');
+
+/* ---------------- state machine ---------------- */
+const S = { OFF:'off', LISTENING:'listening', THINKING:'thinking', SPEAKING:'speaking' };
+let state = S.OFF;
+let onCall = false;
+let history = [];            // {role, content}
+let recog = null;
+let audioCtx = null, analyser = null, ampData = null;
+let currentAudio = null;
+let fakeMouthTimer = 0;      // used when analyser unavailable
+
+function setState(s, label){
+  state = s;
+  document.body.classList.remove('state-listening','state-thinking','state-speaking');
+  if (s !== S.OFF) document.body.classList.add('state-' + s);
+  statusEl.textContent = label || '\u00a0';
+  face.setExpression(
+    s === S.LISTENING ? 'listening' :
+    s === S.THINKING  ? 'thinking'  :
+    s === S.SPEAKING  ? 'speaking'  : 'idle'
+  );
+}
+
+/* ---------------- robot face (canvas) ---------------- */
+const face = (() => {
+  const cv = document.getElementById('face');
+  const cx = cv.getContext('2d');
+  const W = cv.width, H = cv.height, CX = W/2, CY = H/2;
+
+  // animated properties eased toward targets
+  const cur = { eyeH:1, browTilt:0, browRaise:0, pupilX:0, pupilY:0,
+                mouthOpen:.08, mouthCurve:.25, headBob:0, glow:.6 };
+  const tgt = Object.assign({}, cur);
+  let expression = 'idle';
+  let blinkT = 0, nextBlink = 2 + Math.random()*3;
+  let wanderT = 0, t = 0;
+  let mouthLevel = 0;          // live amplitude 0..1 (speaking)
+
+  function setExpression(e){
+    expression = e;
+    switch(e){
+      case 'idle':      Object.assign(tgt,{eyeH:1, browTilt:0,  browRaise:0,  mouthOpen:.08, mouthCurve:.25, glow:.6}); break;
+      case 'listening': Object.assign(tgt,{eyeH:1.15,browTilt:0, browRaise:.5, mouthOpen:.05, mouthCurve:.3,  glow:1}); break;
+      case 'thinking':  Object.assign(tgt,{eyeH:.75,browTilt:.6, browRaise:.3, mouthOpen:.04, mouthCurve:.05, pupilX:.5, pupilY:-.6, glow:.8}); break;
+      case 'speaking':  Object.assign(tgt,{eyeH:1, browTilt:0,  browRaise:.2, mouthCurve:.3,  glow:1}); break;
+      case 'happy':     Object.assign(tgt,{eyeH:.55,browTilt:-.2,browRaise:.6, mouthCurve:.9,  glow:1.1}); break;
+      case 'surprised': Object.assign(tgt,{eyeH:1.35,browTilt:0, browRaise:1,  mouthOpen:.5,  mouthCurve:.1,  glow:1.1}); break;
+    }
+  }
+  function setMouthLevel(v){ mouthLevel = v; }
+
+  function ease(dt){
+    for (const k in tgt) cur[k] += (tgt[k]-cur[k]) * Math.min(1, dt*7);
+  }
+
+  function draw(dt){
+    t += dt;
+    // blinking
+    blinkT += dt;
+    let blink = 1;
+    if (blinkT > nextBlink){
+      const p = (blinkT - nextBlink) / .22;
+      if (p >= 1){ blinkT = 0; nextBlink = 1.8 + Math.random()*3.5; }
+      else blink = Math.abs(1 - p*2);         // close then open
+    }
+    // idle pupil wander
+    if (expression === 'idle' || expression === 'listening'){
+      wanderT += dt;
+      if (wanderT > 2.4){ wanderT = 0; tgt.pupilX = (Math.random()*2-1)*.5; tgt.pupilY = (Math.random()*2-1)*.3; }
+    }
+    if (expression === 'speaking'){ tgt.pupilX = Math.sin(t*.6)*.15; tgt.pupilY = 0; }
+    if (mouthLevel > 0.01) tgt.mouthOpen = .06 + mouthLevel*.85;
+    tgt.headBob = Math.sin(t*1.2)*(expression==='speaking'? 6:3);
+    ease(dt);
+
+    cx.clearRect(0,0,W,H);
+    cx.save();
+    cx.translate(CX, CY + cur.headBob);
+
+    // ---- head plate ----
+    const r = 210;
+    const grad = cx.createLinearGradient(0,-r,0,r);
+    grad.addColorStop(0,'#232e4d'); grad.addColorStop(1,'#151c31');
+    cx.fillStyle = grad;
+    roundRect(-r, -r*.92, r*2, r*1.84, 92); cx.fill();
+    cx.lineWidth = 5; cx.strokeStyle = '#2b3757'; cx.stroke();
+
+    // antenna
+    cx.strokeStyle = '#2b3757'; cx.lineWidth = 8;
+    cx.beginPath(); cx.moveTo(0,-r*.92); cx.lineTo(0,-r*1.12); cx.stroke();
+    cx.fillStyle = `rgba(125,227,255,${.4 + .6*cur.glow*(0.6+0.4*Math.sin(t*3))})`;
+    cx.beginPath(); cx.arc(0,-r*1.2, 13, 0, 7); cx.fill();
+
+    // ear pods
+    cx.fillStyle = '#2b3757';
+    roundRect(-r-16, -34, 20, 68, 10); cx.fill();
+    roundRect( r-4,  -34, 20, 68, 10); cx.fill();
+
+    // ---- face screen ----
+    cx.fillStyle = '#0c1226';
+    roundRect(-r*.8, -r*.68, r*1.6, r*1.36, 64); cx.fill();
+
+    // ---- eyes ----
+    const eyeY = -46, eyeDX = 78;
+    const eh = 46 * cur.eyeH * blink, ew = 34;
+    for (const s of [-1,1]){
+      const ex = s*eyeDX + cur.pupilX*14;
+      const g = cx.createRadialGradient(ex, eyeY, 4, ex, eyeY, 50);
+      g.addColorStop(0, `rgba(125,227,255,${.55*cur.glow})`);
+      g.addColorStop(1, 'rgba(125,227,255,0)');
+      cx.fillStyle = g;
+      cx.beginPath(); cx.arc(ex, eyeY, 52, 0, 7); cx.fill();
+
+      cx.fillStyle = '#7de3ff';
+      cx.beginPath();
+      cx.ellipse(ex, eyeY + cur.pupilY*8, ew, Math.max(3, eh), 0, 0, 7);
+      cx.fill();
+      // pupil highlight
+      cx.fillStyle = 'rgba(255,255,255,.85)';
+      cx.beginPath();
+      cx.ellipse(ex - 10 + cur.pupilX*6, eyeY - eh*.35 + cur.pupilY*8, 8, Math.max(2, eh*.22), 0, 0, 7);
+      cx.fill();
+    }
+
+    // ---- brows (light bars above eyes) ----
+    cx.strokeStyle = `rgba(125,227,255,${.75*cur.glow})`;
+    cx.lineWidth = 10; cx.lineCap = 'round';
+    for (const s of [-1,1]){
+      const bx = s*eyeDX, by = eyeY - 58 - cur.browRaise*16;
+      const tilt = cur.browTilt * 12 * s;
+      cx.beginPath();
+      cx.moveTo(bx - 34, by + tilt);
+      cx.lineTo(bx + 34, by - tilt);
+      cx.stroke();
+    }
+
+    // ---- mouth ----
+    const my = 84, mw = 96;
+    const open = Math.max(.03, cur.mouthOpen);
+    const curve = cur.mouthCurve;
+    cx.fillStyle = '#7de3ff';
+    cx.beginPath();
+    cx.moveTo(-mw/2, my - curve*18);
+    cx.quadraticCurveTo(0, my - curve*18 - open*8, mw/2, my - curve*18);
+    cx.quadraticCurveTo(mw/2 + open*6, my + open*46*.5, mw/2, my + open*46 + curve*14);
+    cx.quadraticCurveTo(0, my + open*46 + curve*30, -mw/2, my + open*46 + curve*14);
+    cx.quadraticCurveTo(-mw/2 - open*6, my + open*46*.5, -mw/2, my - curve*18);
+    cx.closePath();
+    cx.fill();
+    // inner mouth when open
+    if (open > .18){
+      cx.fillStyle = '#0c1226';
+      cx.beginPath();
+      cx.ellipse(0, my + open*24, mw*.32, open*18, 0, 0, 7);
+      cx.fill();
+    }
+
+    // cheek lights when happy
+    if (curve > .55){
+      cx.fillStyle = 'rgba(240,120,140,.35)';
+      cx.beginPath(); cx.ellipse(-eyeDX-14, 34, 22, 12, 0, 0, 7); cx.fill();
+      cx.beginPath(); cx.ellipse( eyeDX+14, 34, 22, 12, 0, 0, 7); cx.fill();
+    }
+
+    cx.restore();
+  }
+
+  function roundRect(x,y,w,h,rad){
+    cx.beginPath();
+    cx.moveTo(x+rad,y);
+    cx.arcTo(x+w,y,x+w,y+h,rad);
+    cx.arcTo(x+w,y+h,x,y+h,rad);
+    cx.arcTo(x,y+h,x,y,rad);
+    cx.arcTo(x,y,x+w,y,rad);
+    cx.closePath();
+  }
+
+  let last = performance.now();
+  (function loop(now){
+    const dt = Math.min(.05, (now-last)/1000); last = now;
+    draw(dt);
+    requestAnimationFrame(loop);
+  })(last);
+
+  setExpression('idle');
+  return { setExpression, setMouthLevel };
+})();
+
+/* ---------------- lip sync (analyser or fake) ---------------- */
+function startLipSyncFromAnalyser(){
+  function tick(){
+    if (state !== S.SPEAKING) { face.setMouthLevel(0); return; }
+    let level = 0;
+    if (analyser && ampData){
+      analyser.getByteTimeDomainData(ampData);
+      let sum = 0;
+      for (let i=0;i<ampData.length;i++){ const d = (ampData[i]-128)/128; sum += d*d; }
+      level = Math.min(1, Math.sqrt(sum/ampData.length) * 5.5);
+    } else {
+      fakeMouthTimer += .08;
+      level = Math.max(0, Math.sin(fakeMouthTimer*7)*.5 + .35 + Math.sin(fakeMouthTimer*13)*.2);
+    }
+    face.setMouthLevel(level);
+    requestAnimationFrame(tick);
+  }
+  tick();
+}
+
+/* ---------------- speech recognition ---------------- */
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+function startListening(){
+  if (!onCall) return;
+  setState(S.LISTENING, 'Listening…');
+  try { recog && recog.abort(); } catch(e){}
+  recog = new SR();
+  recog.lang = navigator.language || 'en-US';
+  recog.continuous = false;
+  recog.interimResults = false;
+  recog.maxAlternatives = 1;
+
+  let got = false;
+  recog.onresult = (ev) => {
+    const text = ev.results[0][0].transcript.trim();
+    if (!text) return;
+    got = true;
+    handleUserSpeech(text);
+  };
+  recog.onerror = (ev) => {
+    if (!onCall) return;
+    if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed'){
+      endCall('Microphone blocked — allow mic access and try again.');
+      return;
+    }
+    // no-speech, aborted, network → just restart listening
+    if (state === S.LISTENING) setTimeout(() => { if (onCall && state === S.LISTENING) startListening(); }, 400);
+  };
+  recog.onend = () => {
+    if (onCall && !got && state === S.LISTENING){
+      setTimeout(() => { if (onCall && state === S.LISTENING) startListening(); }, 300);
+    }
+  };
+  try { recog.start(); } catch(e){ /* already started */ }
+}
+
+function stopListening(){
+  if (recog){ try{ recog.onend = null; recog.abort(); }catch(e){} recog = null; }
+}
+
+/* ---------------- LLM ---------------- */
+async function askMia(userText){
+  history.push({ role:'user', content:userText });
+  if (history.length > 20) history = history.slice(-20);
+  const res = await fetch('https://text.pollinations.ai/', {
+    method:'POST',
+    headers:{ 'Content-Type':'application/json' },
+    body: JSON.stringify({
+      model:'openai',
+      messages:[ { role:'system', content:SYSTEM_PROMPT }, ...history ],
+      private: true
+    })
+  });
+  if (!res.ok) throw new Error('LLM HTTP ' + res.status);
+  const reply = (await res.text()).trim();
+  if (!reply) throw new Error('empty reply');
+  history.push({ role:'assistant', content:reply });
+  return reply;
+}
+
+function inferExpression(text){
+  const t = text.toLowerCase();
+  if (/\bhaha|\blol|😄|😂|great|love|awesome|amazing/.test(t)) return 'happy';
+  if (/\bwow|really\?|no way|seriously\?|what\?!/.test(t)) return 'surprised';
+  if (text.includes('!')) return 'happy';
+  return 'speaking';
+}
+
+/* ---------------- TTS ---------------- */
+async function speak(text){
+  setState(S.SPEAKING, 'Mia is speaking');
+  const expr = inferExpression(text);
+  try {
+    const prompt = 'Read this aloud exactly as written, with natural feeling, and say nothing else: ' + text;
+    const url = 'https://text.pollinations.ai/' + encodeURIComponent(prompt) +
+                '?model=openai-audio&voice=' + TTS_VOICE + '&private=true';
+    const res = await fetch(url);
+    if (!res.ok || !(res.headers.get('content-type')||'').includes('audio')) throw new Error('TTS failed');
+    const blob = await res.blob();
+    await playBlob(blob, expr);
+  } catch(e){
+    await speakFallback(text, expr);
+  }
+  if (onCall) startListening();
+}
+
+function playBlob(blob, expr){
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    currentAudio = audio;
+    try {
+      if (audioCtx){
+        const src = audioCtx.createMediaElementSource(audio);
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 512;
+        ampData = new Uint8Array(analyser.fftSize);
+        src.connect(analyser); analyser.connect(audioCtx.destination);
+      }
+    } catch(e){ analyser = null; }
+    audio.onplay = () => {
+      face.setExpression(expr);                    // flash emotion (happy/surprised)
+      if (expr !== 'speaking') setTimeout(() => { if (state === S.SPEAKING) face.setExpression('speaking'); }, 1100);
+      startLipSyncFromAnalyser();
+    };
+    audio.onended = () => { URL.revokeObjectURL(url); currentAudio = null; face.setMouthLevel(0); resolve(); };
+    audio.onerror  = () => { URL.revokeObjectURL(url); currentAudio = null; resolve(); };
+    audio.play().catch(() => resolve());
+  });
+}
+
+function speakFallback(text, expr){
+  return new Promise((resolve) => {
+    if (!('speechSynthesis' in window)) return resolve();
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    const voices = speechSynthesis.getVoices();
+    const v = voices.find(v => /female|samantha|zira|google (us|uk) english/i.test(v.name));
+    if (v) u.voice = v;
+    u.rate = 1.02; u.pitch = 1.1;
+    analyser = null;              // fake lip sync
+    u.onstart = () => { face.setExpression('speaking'); startLipSyncFromAnalyser(); };
+    u.onend = () => { face.setMouthLevel(0); resolve(); };
+    u.onerror = () => resolve();
+    speechSynthesis.speak(u);
+  });
+}
+
+/* ---------------- conversation flow ---------------- */
+async function handleUserSpeech(text){
+  stopListening();
+  setState(S.THINKING, 'Thinking…');
+  try {
+    const reply = await askMia(text);
+    if (!onCall) return;
+    await speak(reply);
+  } catch(e){
+    if (!onCall) return;
+    await speakFallback("Sorry, my connection glitched. Say that again?", 'speaking');
+    if (onCall) startListening();
+  }
+}
+
+/* ---------------- call control ---------------- */
+async function startCall(){
+  if (!SR){
+    hintEl.textContent = 'Speech recognition is not supported in this browser. Please use Chrome or Edge.';
+    return;
+  }
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    await audioCtx.resume();                       // mobile audio unlock
+  } catch(e){ audioCtx = null; }
+  onCall = true;
+  history = [];
+  document.body.classList.add('oncall');
+  callBtn.setAttribute('aria-label','End call');
+  hintEl.textContent = 'Say hi — Mia is listening.';
+  // Mia greets first
+  stopListening();
+  setState(S.THINKING, 'Connecting…');
+  try {
+    const greeting = await askMia('(The call just connected. Greet me briefly as if you picked up the phone.)');
+    history = history.slice(-1); // keep only Mia's greeting context light
+    if (onCall) await speak(greeting);
+  } catch(e){
+    if (onCall) { await speakFallback("Hey, it's Mia. What's up?", 'happy'); }
+  }
+  if (onCall && state !== S.LISTENING) startListening();
+}
+
+function endCall(msg){
+  onCall = false;
+  stopListening();
+  if (currentAudio){ try{ currentAudio.pause(); }catch(e){} currentAudio = null; }
+  if ('speechSynthesis' in window) speechSynthesis.cancel();
+  document.body.classList.remove('oncall');
+  callBtn.setAttribute('aria-label','Start call');
+  setState(S.OFF, msg || 'Call ended');
+  hintEl.textContent = 'Tap to call Mia. Use Chrome or Edge with a microphone.';
+  setTimeout(() => { if (!onCall) statusEl.textContent = '\u00a0'; }, 2500);
+}
+
+callBtn.addEventListener('click', () => { onCall ? endCall() : startCall(); });
+</script>
+</body>
+</html>
