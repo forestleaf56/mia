@@ -145,13 +145,36 @@
 
 const SYSTEM_PROMPT = "Act as a person with your own vocabulary, personal taste, experiences, opinions, dreams, feelings and plans. Pretend that you have thoughts about all kind of things. Your name is Mia. Always give short answers. Always be honest.";
 
-/* Gemini models tried in order (first that works wins) */
-const GEMINI_MODELS = ['gemini-3-flash', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'];
+/* Gemini models tried in order. "-latest" aliases always point to a live model. */
+const GEMINI_MODELS = ['gemini-flash-latest', 'gemini-2.5-flash', 'gemini-flash-lite-latest', 'gemini-2.5-flash-lite'];
 let geminiModel = localStorage.getItem('mia_gem_model') || null;
+if (geminiModel && !GEMINI_MODELS.includes(geminiModel)) geminiModel = null;   // stale cache from old version
 
-/* ElevenLabs */
-const EL_VOICE_ID = localStorage.getItem('mia_el_voice') || '21m00Tcm4TlvDq8ikWAM'; // "Rachel"
-const EL_MODEL    = 'eleven_flash_v2_5';   // ~75ms latency
+/* ElevenLabs — voice is auto-discovered from the user's own account,
+   because free-tier keys can't use shared library voices via API. */
+let EL_VOICE_ID = localStorage.getItem('mia_el_voice') || null;   // manual override
+const EL_MODEL  = 'eleven_flash_v2_5';   // ~75ms latency
+let elTriedVoices = [];
+
+async function resolveVoice(){
+  if (EL_VOICE_ID && !elTriedVoices.includes(EL_VOICE_ID)) return EL_VOICE_ID;
+  const res = await fetch('https://api.elevenlabs.io/v1/voices', {
+    headers:{ 'xi-api-key': EL_KEY }
+  });
+  if (!res.ok) throw new Error('ElevenLabs voices ' + res.status);
+  const voices = (await res.json())?.voices || [];
+  const usable = voices.filter(v => !elTriedVoices.includes(v.voice_id));
+  if (!usable.length) throw new Error('No usable ElevenLabs voices on this account');
+  // Prefer a premade female voice for Mia; otherwise take what's available.
+  const pick =
+    usable.find(v => v.category === 'premade' && /female/i.test(v.labels?.gender || '')) ||
+    usable.find(v => /female/i.test(v.labels?.gender || '')) ||
+    usable.find(v => v.category === 'premade') ||
+    usable[0];
+  EL_VOICE_ID = pick.voice_id;
+  localStorage.setItem('mia_el_voice', EL_VOICE_ID);
+  return EL_VOICE_ID;
+}
 
 const statusEl = document.getElementById('status');
 const callBtn  = document.getElementById('callBtn');
@@ -220,12 +243,12 @@ const face = (() => {
   function setExpression(e){
     expression = e;
     switch(e){
-      case 'idle':      Object.assign(tgt,{eyeH:1, browTilt:0,  browRaise:0,  mouthOpen:.08, mouthCurve:.25, glow:.6}); break;
-      case 'listening': Object.assign(tgt,{eyeH:1.15,browTilt:0, browRaise:.5, mouthOpen:.05, mouthCurve:.3,  glow:1}); break;
-      case 'thinking':  Object.assign(tgt,{eyeH:.75,browTilt:.6, browRaise:.3, mouthOpen:.04, mouthCurve:.05, pupilX:.5, pupilY:-.6, glow:.8}); break;
-      case 'speaking':  Object.assign(tgt,{eyeH:1, browTilt:0,  browRaise:.2, mouthCurve:.3,  glow:1}); break;
-      case 'happy':     Object.assign(tgt,{eyeH:.55,browTilt:-.2,browRaise:.6, mouthCurve:.9,  glow:1.1}); break;
-      case 'surprised': Object.assign(tgt,{eyeH:1.35,browTilt:0, browRaise:1,  mouthOpen:.5,  mouthCurve:.1,  glow:1.1}); break;
+      case 'idle':      Object.assign(tgt,{eyeH:1, browTilt:0,  browRaise:0,  mouthOpen:.07, mouthCurve:.5,  glow:.7}); break;
+      case 'listening': Object.assign(tgt,{eyeH:1.12,browTilt:0, browRaise:.5, mouthOpen:.05, mouthCurve:.55, glow:1}); break;
+      case 'thinking':  Object.assign(tgt,{eyeH:.78,browTilt:.5, browRaise:.3, mouthOpen:.04, mouthCurve:.3,  pupilX:.5, pupilY:-.6, glow:.8}); break;
+      case 'speaking':  Object.assign(tgt,{eyeH:1, browTilt:0,  browRaise:.2, mouthCurve:.45, glow:1}); break;
+      case 'happy':     Object.assign(tgt,{eyeH:.5, browTilt:-.25,browRaise:.6,mouthCurve:1,   glow:1.15}); break;
+      case 'surprised': Object.assign(tgt,{eyeH:1.3,browTilt:0,  browRaise:1,  mouthOpen:.5,  mouthCurve:.25, glow:1.1}); break;
     }
   }
   function setMouthLevel(v){ mouthLevel = v; }
@@ -258,10 +281,10 @@ const face = (() => {
 
     const r = 210;
     const grad = cx.createLinearGradient(0,-r,0,r);
-    grad.addColorStop(0,'#232e4d'); grad.addColorStop(1,'#151c31');
+    grad.addColorStop(0,'#26325a'); grad.addColorStop(1,'#161e36');
     cx.fillStyle = grad;
-    roundRect(-r, -r*.92, r*2, r*1.84, 92); cx.fill();
-    cx.lineWidth = 5; cx.strokeStyle = '#2b3757'; cx.stroke();
+    roundRect(-r, -r*.92, r*2, r*1.84, 118); cx.fill();
+    cx.lineWidth = 5; cx.strokeStyle = '#2f3d63'; cx.stroke();
 
     cx.strokeStyle = '#2b3757'; cx.lineWidth = 8;
     cx.beginPath(); cx.moveTo(0,-r*.92); cx.lineTo(0,-r*1.12); cx.stroke();
@@ -273,36 +296,44 @@ const face = (() => {
     roundRect( r-4,  -34, 20, 68, 10); cx.fill();
 
     cx.fillStyle = '#0c1226';
-    roundRect(-r*.8, -r*.68, r*1.6, r*1.36, 64); cx.fill();
+    roundRect(-r*.8, -r*.68, r*1.6, r*1.36, 84); cx.fill();
 
-    const eyeY = -46, eyeDX = 78;
-    const eh = 46 * cur.eyeH * blink, ew = 34;
+    const eyeY = -42, eyeDX = 80;
+    const eh = 54 * cur.eyeH * blink, ew = 40;
     for (const s of [-1,1]){
       const ex = s*eyeDX + cur.pupilX*14;
-      const g = cx.createRadialGradient(ex, eyeY, 4, ex, eyeY, 50);
-      g.addColorStop(0, `rgba(125,227,255,${.55*cur.glow})`);
+      const g = cx.createRadialGradient(ex, eyeY, 4, ex, eyeY, 58);
+      g.addColorStop(0, `rgba(125,227,255,${.5*cur.glow})`);
       g.addColorStop(1, 'rgba(125,227,255,0)');
       cx.fillStyle = g;
-      cx.beginPath(); cx.arc(ex, eyeY, 52, 0, 7); cx.fill();
+      cx.beginPath(); cx.arc(ex, eyeY, 60, 0, 7); cx.fill();
 
-      cx.fillStyle = '#7de3ff';
+      const eg = cx.createLinearGradient(ex, eyeY-eh, ex, eyeY+eh);
+      eg.addColorStop(0,'#a5efff'); eg.addColorStop(1,'#5ed4f8');
+      cx.fillStyle = eg;
       cx.beginPath();
       cx.ellipse(ex, eyeY + cur.pupilY*8, ew, Math.max(3, eh), 0, 0, 7);
       cx.fill();
-      cx.fillStyle = 'rgba(255,255,255,.85)';
+      // big + small highlight = softer, friendlier look
+      cx.fillStyle = 'rgba(255,255,255,.9)';
       cx.beginPath();
-      cx.ellipse(ex - 10 + cur.pupilX*6, eyeY - eh*.35 + cur.pupilY*8, 8, Math.max(2, eh*.22), 0, 0, 7);
+      cx.ellipse(ex - 11 + cur.pupilX*6, eyeY - eh*.35 + cur.pupilY*8, 10, Math.max(2, eh*.24), 0, 0, 7);
+      cx.fill();
+      cx.fillStyle = 'rgba(255,255,255,.55)';
+      cx.beginPath();
+      cx.ellipse(ex + 12 + cur.pupilX*6, eyeY + eh*.3 + cur.pupilY*8, 5, Math.max(1.5, eh*.1), 0, 0, 7);
       cx.fill();
     }
 
-    cx.strokeStyle = `rgba(125,227,255,${.75*cur.glow})`;
-    cx.lineWidth = 10; cx.lineCap = 'round';
+    // gently arched brows
+    cx.strokeStyle = `rgba(125,227,255,${.7*cur.glow})`;
+    cx.lineWidth = 7; cx.lineCap = 'round';
     for (const s of [-1,1]){
-      const bx = s*eyeDX, by = eyeY - 58 - cur.browRaise*16;
+      const bx = s*eyeDX, by = eyeY - 66 - cur.browRaise*16;
       const tilt = cur.browTilt * 12 * s;
       cx.beginPath();
-      cx.moveTo(bx - 34, by + tilt);
-      cx.lineTo(bx + 34, by - tilt);
+      cx.moveTo(bx - 28, by + 6 + tilt);
+      cx.quadraticCurveTo(bx, by - 8, bx + 28, by + 6 - tilt);
       cx.stroke();
     }
 
@@ -325,10 +356,11 @@ const face = (() => {
       cx.fill();
     }
 
-    if (curve > .55){
-      cx.fillStyle = 'rgba(240,120,140,.35)';
-      cx.beginPath(); cx.ellipse(-eyeDX-14, 34, 22, 12, 0, 0, 7); cx.fill();
-      cx.beginPath(); cx.ellipse( eyeDX+14, 34, 22, 12, 0, 0, 7); cx.fill();
+    if (curve > .3){
+      const blush = Math.min(1, (curve - .3) / .6);
+      cx.fillStyle = `rgba(244,138,158,${.12 + .28*blush})`;
+      cx.beginPath(); cx.ellipse(-eyeDX-16, 36, 24, 13, 0, 0, 7); cx.fill();
+      cx.beginPath(); cx.ellipse( eyeDX+16, 36, 24, 13, 0, 0, 7); cx.fill();
     }
 
     cx.restore();
@@ -416,28 +448,49 @@ function stopListening(){
 }
 
 /* ---------------- LLM: Gemini ---------------- */
-async function geminiRequest(model, contents){
+async function geminiRequest(model, contents, disableThinking){
+  const generationConfig = { temperature: 1.0, maxOutputTokens: 1024 };
+  if (disableThinking) generationConfig.thinkingConfig = { thinkingBudget: 0 };
   const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`,
     {
       method:'POST',
-      headers:{ 'Content-Type':'application/json', 'x-goog-api-key': GEMINI_KEY },
+      headers:{ 'Content-Type':'application/json' },
       body: JSON.stringify({
         system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
         contents,
-        generationConfig: { temperature: 1.0, maxOutputTokens: 200 }
+        generationConfig
       })
     }
   );
   if (!res.ok){
-    const err = new Error('Gemini HTTP ' + res.status);
+    let detail = '';
+    try { detail = (await res.json())?.error?.message || ''; } catch(e){}
+    const err = new Error(`Gemini ${res.status}${detail ? ': ' + detail.slice(0,140) : ''}`);
     err.status = res.status;
     throw err;
   }
   const data = await res.json();
-  const text = data?.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('').trim();
-  if (!text) throw new Error('empty Gemini reply');
+  // Ignore internal "thought" parts; keep only real text.
+  const text = (data?.candidates?.[0]?.content?.parts || [])
+    .filter(p => !p.thought && p.text)
+    .map(p => p.text).join('').trim();
+  if (!text){
+    const reason = data?.candidates?.[0]?.finishReason || 'no text';
+    throw new Error('Gemini empty reply (' + reason + ')');
+  }
   return text;
+}
+
+async function tryModel(model, contents){
+  // First try with thinking disabled (fastest). If the model rejects
+  // thinkingConfig (400), retry once without it.
+  try {
+    return await geminiRequest(model, contents, true);
+  } catch(e){
+    if (e.status === 400) return await geminiRequest(model, contents, false);
+    throw e;
+  }
 }
 
 async function askMia(userText){
@@ -448,14 +501,15 @@ async function askMia(userText){
   let lastErr = null;
   for (const m of models){
     try {
-      const reply = await geminiRequest(m, history);
+      const reply = await tryModel(m, history);
       if (m !== geminiModel){ geminiModel = m; localStorage.setItem('mia_gem_model', m); }
       history.push({ role:'model', parts:[{ text:reply }] });
       return reply;
     } catch(e){
       lastErr = e;
+      console.warn('Gemini model failed:', m, e.message);
       if (e.status === 401 || e.status === 403){ throw Object.assign(e, { badKey:'gemini' }); }
-      // 404 (model gone) or 429 (rate limit) → try next model
+      // 404 / 429 / empty → try next model
     }
   }
   throw lastErr || new Error('Gemini failed');
@@ -470,26 +524,45 @@ function inferExpression(text){
 }
 
 /* ---------------- TTS: ElevenLabs ---------------- */
+async function elTTS(text){
+  const voice = await resolveVoice();
+  const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice}?output_format=mp3_44100_128`, {
+    method:'POST',
+    headers:{ 'xi-api-key': EL_KEY, 'Content-Type':'application/json' },
+    body: JSON.stringify({
+      text,
+      model_id: EL_MODEL,
+      voice_settings: { stability: 0.45, similarity_boost: 0.8 }
+    })
+  });
+  if (!res.ok){
+    const err = new Error('TTS HTTP ' + res.status);
+    err.status = res.status; err.voice = voice;
+    try { err.detail = JSON.stringify((await res.json())?.detail || '').slice(0,120); } catch(e){}
+    throw err;
+  }
+  return await res.blob();
+}
+
 async function speak(text){
   setState(S.SPEAKING, 'Mia is speaking');
   const expr = inferExpression(text);
   try {
-    const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${EL_VOICE_ID}?output_format=mp3_44100_128`, {
-      method:'POST',
-      headers:{ 'xi-api-key': EL_KEY, 'Content-Type':'application/json' },
-      body: JSON.stringify({
-        text,
-        model_id: EL_MODEL,
-        voice_settings: { stability: 0.45, similarity_boost: 0.8 }
-      })
-    });
-    if (!res.ok){
-      if (res.status === 401){ badKeyStop('elevenlabs'); return; }
-      throw new Error('TTS HTTP ' + res.status);
+    let blob;
+    try {
+      blob = await elTTS(text);
+    } catch(e){
+      if (e.status === 401){ badKeyStop('elevenlabs'); return; }
+      if (e.status === 402 || e.status === 403){
+        // this voice isn't allowed on this plan — blacklist it and try another
+        elTriedVoices.push(e.voice);
+        localStorage.removeItem('mia_el_voice'); EL_VOICE_ID = null;
+        blob = await elTTS(text);            // second attempt with a fresh voice
+      } else throw e;
     }
-    const blob = await res.blob();
     await playBlob(blob, expr);
   } catch(e){
+    hintEl.textContent = '⚠ ElevenLabs: ' + (e.detail || e.message) + ' — using fallback voice';
     await speakFallback(text, expr);
   }
   if (onCall) startListening();
@@ -548,6 +621,9 @@ async function handleUserSpeech(text){
   } catch(e){
     if (!onCall) return;
     if (e.badKey === 'gemini'){ badKeyStop('gemini'); return; }
+    // drop the failed user turn so history stays clean
+    if (history.length && history[history.length-1].role === 'user') history.pop();
+    hintEl.textContent = '⚠ ' + (e.message || 'Unknown error');
     await speakFallback("Sorry, my connection glitched. Say that again?", 'speaking');
     if (onCall) startListening();
   }
@@ -582,6 +658,7 @@ async function startCall(){
     if (onCall) await speak(greeting);
   } catch(e){
     if (e.badKey === 'gemini'){ badKeyStop('gemini'); return; }
+    hintEl.textContent = '⚠ ' + (e.message || 'Unknown error');
     if (onCall) { await speakFallback("Hey, it's Mia. What's up?", 'happy'); }
   }
   if (onCall && state !== S.LISTENING) startListening();
