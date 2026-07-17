@@ -85,11 +85,11 @@
   .card p{font-size:13px;color:var(--ink-dim);line-height:1.55;margin-bottom:16px}
   .card p a{color:var(--glow);text-decoration:none}
   .card label{display:block;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-dim);margin:14px 0 6px}
-  .card input{
+  .card input, .card select{
     width:100%;padding:12px 14px;border-radius:12px;border:1px solid var(--plate-edge);
     background:#0c1226;color:var(--ink);font-size:14px;outline:none;
   }
-  .card input:focus{border-color:var(--glow)}
+  .card input:focus, .card select:focus{border-color:var(--glow)}
   #saveKeys{
     margin-top:20px;width:100%;padding:14px;border:none;border-radius:14px;cursor:pointer;
     background:var(--call);color:#06281a;font-size:15px;font-weight:700;
@@ -126,6 +126,11 @@
       • Gemini key: <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a><br>
       • ElevenLabs key: <a href="https://elevenlabs.io" target="_blank" rel="noopener">elevenlabs.io</a> → profile → API Keys
     </p>
+    <label for="langSel">Language / Språk</label>
+    <select id="langSel">
+      <option value="en">English</option>
+      <option value="sv">Svenska</option>
+    </select>
     <label for="gemKey">Gemini API key</label>
     <input id="gemKey" type="password" placeholder="AIza..." autocomplete="off">
     <label for="elKey">ElevenLabs API key</label>
@@ -143,7 +148,40 @@
    LLM: Google Gemini (free tier)   TTS: ElevenLabs Flash v2.5
    ============================================================ */
 
-const SYSTEM_PROMPT = "Act as a person with your own vocabulary, personal taste, experiences, opinions, dreams, feelings and plans. Pretend that you have thoughts about all kind of things. Your name is Mia. Always give short answers. Always be honest.";
+const SYSTEM_PROMPT_BASE = "Act as a person with your own vocabulary, personal taste, experiences, opinions, dreams, feelings and plans. Pretend that you have thoughts about all kind of things. Your name is Mia. Always give short answers. Always be honest.";
+
+/* ---------------- language ---------------- */
+let LANG = localStorage.getItem('mia_lang') || 'en';
+const I18N = {
+  en: {
+    sub:'voice call', hintIdle:'Tap to call Mia. Use Chrome or Edge with a microphone.',
+    hintOn:'Say hi — Mia is listening.', listening:'Listening…', thinking:'Thinking…',
+    speaking:'Mia is speaking', connecting:'Connecting…', ended:'Call ended',
+    micBlocked:'Microphone blocked — allow mic access and try again.',
+    noSR:'Speech recognition is not supported in this browser. Please use Chrome or Edge.',
+    glitch:"Sorry, my connection glitched. Say that again?",
+    fallbackGreet:"Hey, it's Mia. What's up?",
+    greetCue:'(The call just connected. Greet me briefly as if you picked up the phone.)',
+    speakRule:' Always answer in English.'
+  },
+  sv: {
+    sub:'röstsamtal', hintIdle:'Tryck för att ringa Mia. Använd Chrome eller Edge med mikrofon.',
+    hintOn:'Säg hej — Mia lyssnar.', listening:'Lyssnar…', thinking:'Tänker…',
+    speaking:'Mia pratar', connecting:'Ansluter…', ended:'Samtalet avslutat',
+    micBlocked:'Mikrofonen är blockerad — tillåt mikrofonåtkomst och försök igen.',
+    noSR:'Taligenkänning stöds inte i den här webbläsaren. Använd Chrome eller Edge.',
+    glitch:'Förlåt, min anslutning strulade. Kan du säga det igen?',
+    fallbackGreet:'Hej, det är Mia. Läget?',
+    greetCue:'(Samtalet kopplades precis. Hälsa kort som om du svarade i telefon.)',
+    speakRule:' Svara alltid på svenska.'
+  }
+};
+const T = () => I18N[LANG];
+const SYSTEM_PROMPT = () => SYSTEM_PROMPT_BASE + T().speakRule;
+function applyLang(){
+  document.querySelector('header .sub').textContent = T().sub;
+  if (!onCall) hintEl.textContent = T().hintIdle;
+}
 
 /* Gemini models tried in order. "-latest" aliases always point to a live model. */
 const GEMINI_MODELS = ['gemini-flash-latest', 'gemini-2.5-flash', 'gemini-flash-lite-latest', 'gemini-2.5-flash-lite'];
@@ -189,6 +227,7 @@ let EL_KEY     = localStorage.getItem('mia_el_key') || '';
 /* ---------------- key setup UI ---------------- */
 function showSetup(){
   gemInput.value = GEMINI_KEY; elInput.value = EL_KEY;
+  document.getElementById('langSel').value = LANG;
   document.getElementById('setupErr').textContent = '';
   setupEl.classList.remove('hidden');
 }
@@ -199,6 +238,8 @@ document.getElementById('saveKeys').addEventListener('click', () => {
   GEMINI_KEY = g; EL_KEY = e;
   localStorage.setItem('mia_gemini_key', g);
   localStorage.setItem('mia_el_key', e);
+  const newLang = document.getElementById('langSel').value;
+  if (newLang !== LANG){ LANG = newLang; localStorage.setItem('mia_lang', LANG); applyLang(); }
   localStorage.removeItem('mia_gem_model'); geminiModel = null;   // re-probe models
   setupEl.classList.add('hidden');
 });
@@ -412,17 +453,23 @@ const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 
 function startListening(){
   if (!onCall) return;
-  setState(S.LISTENING, 'Listening…');
+  setState(S.LISTENING, T().listening);
   try { recog && recog.abort(); } catch(e){}
   recog = new SR();
-  recog.lang = navigator.language || 'en-US';
-  recog.continuous = false;
+  recog.lang = LANG === 'sv' ? 'sv-SE' : 'en-US';
+  // continuous = true keeps the mic session open for your whole turn,
+  // so Android's recognition chime plays once per turn instead of on
+  // every silence-restart.
+  recog.continuous = true;
   recog.interimResults = false;
   recog.maxAlternatives = 1;
 
   let got = false;
   recog.onresult = (ev) => {
-    const text = ev.results[0][0].transcript.trim();
+    if (got || state !== S.LISTENING) return;
+    const last = ev.results[ev.results.length - 1];
+    if (!last.isFinal) return;
+    const text = last[0].transcript.trim();
     if (!text) return;
     got = true;
     handleUserSpeech(text);
@@ -430,7 +477,7 @@ function startListening(){
   recog.onerror = (ev) => {
     if (!onCall) return;
     if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed'){
-      endCall('Microphone blocked — allow mic access and try again.');
+      endCall(T().micBlocked);
       return;
     }
     if (state === S.LISTENING) setTimeout(() => { if (onCall && state === S.LISTENING) startListening(); }, 400);
@@ -457,7 +504,7 @@ async function geminiRequest(model, contents, disableThinking){
       method:'POST',
       headers:{ 'Content-Type':'application/json' },
       body: JSON.stringify({
-        system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
+        system_instruction: { parts: [{ text: SYSTEM_PROMPT() }] },
         contents,
         generationConfig
       })
@@ -526,14 +573,16 @@ function inferExpression(text){
 /* ---------------- TTS: ElevenLabs ---------------- */
 async function elTTS(text){
   const voice = await resolveVoice();
+  const body = {
+    text,
+    model_id: EL_MODEL,
+    voice_settings: { stability: 0.45, similarity_boost: 0.8 }
+  };
+  if (LANG === 'sv') body.language_code = 'sv';   // Flash v2.5 supports language enforcement
   const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice}?output_format=mp3_44100_128`, {
     method:'POST',
     headers:{ 'xi-api-key': EL_KEY, 'Content-Type':'application/json' },
-    body: JSON.stringify({
-      text,
-      model_id: EL_MODEL,
-      voice_settings: { stability: 0.45, similarity_boost: 0.8 }
-    })
+    body: JSON.stringify(body)
   });
   if (!res.ok){
     const err = new Error('TTS HTTP ' + res.status);
@@ -545,7 +594,7 @@ async function elTTS(text){
 }
 
 async function speak(text){
-  setState(S.SPEAKING, 'Mia is speaking');
+  setState(S.SPEAKING, T().speaking);
   const expr = inferExpression(text);
   try {
     let blob;
@@ -598,8 +647,11 @@ function speakFallback(text, expr){
     if (!('speechSynthesis' in window)) return resolve();
     speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(text);
+    u.lang = LANG === 'sv' ? 'sv-SE' : 'en-US';
     const voices = speechSynthesis.getVoices();
-    const v = voices.find(v => /female|samantha|zira|google (us|uk) english/i.test(v.name));
+    const v = LANG === 'sv'
+      ? voices.find(v => v.lang && v.lang.toLowerCase().startsWith('sv'))
+      : voices.find(v => /female|samantha|zira|google (us|uk) english/i.test(v.name));
     if (v) u.voice = v;
     u.rate = 1.02; u.pitch = 1.1;
     analyser = null;
@@ -613,7 +665,7 @@ function speakFallback(text, expr){
 /* ---------------- conversation flow ---------------- */
 async function handleUserSpeech(text){
   stopListening();
-  setState(S.THINKING, 'Thinking…');
+  setState(S.THINKING, T().thinking);
   try {
     const reply = await askMia(text);
     if (!onCall) return;
@@ -624,7 +676,7 @@ async function handleUserSpeech(text){
     // drop the failed user turn so history stays clean
     if (history.length && history[history.length-1].role === 'user') history.pop();
     hintEl.textContent = '⚠ ' + (e.message || 'Unknown error');
-    await speakFallback("Sorry, my connection glitched. Say that again?", 'speaking');
+    await speakFallback(T().glitch, 'speaking');
     if (onCall) startListening();
   }
 }
@@ -637,7 +689,7 @@ function badKeyStop(which){
 /* ---------------- call control ---------------- */
 async function startCall(){
   if (!SR){
-    hintEl.textContent = 'Speech recognition is not supported in this browser. Please use Chrome or Edge.';
+    hintEl.textContent = T().noSR;
     return;
   }
   if (!GEMINI_KEY || !EL_KEY){ showSetup(); return; }
@@ -649,17 +701,17 @@ async function startCall(){
   history = [];
   document.body.classList.add('oncall');
   callBtn.setAttribute('aria-label','End call');
-  hintEl.textContent = 'Say hi — Mia is listening.';
+  hintEl.textContent = T().hintOn;
   stopListening();
-  setState(S.THINKING, 'Connecting…');
+  setState(S.THINKING, T().connecting);
   try {
-    const greeting = await askMia('(The call just connected. Greet me briefly as if you picked up the phone.)');
+    const greeting = await askMia(T().greetCue);
     history = history.slice(-1);
     if (onCall) await speak(greeting);
   } catch(e){
     if (e.badKey === 'gemini'){ badKeyStop('gemini'); return; }
     hintEl.textContent = '⚠ ' + (e.message || 'Unknown error');
-    if (onCall) { await speakFallback("Hey, it's Mia. What's up?", 'happy'); }
+    if (onCall) { await speakFallback(T().fallbackGreet, 'happy'); }
   }
   if (onCall && state !== S.LISTENING) startListening();
 }
@@ -671,12 +723,13 @@ function endCall(msg){
   if ('speechSynthesis' in window) speechSynthesis.cancel();
   document.body.classList.remove('oncall');
   callBtn.setAttribute('aria-label','Start call');
-  setState(S.OFF, msg || 'Call ended');
-  hintEl.textContent = 'Tap to call Mia. Use Chrome or Edge with a microphone.';
+  setState(S.OFF, msg || T().ended);
+  hintEl.textContent = T().hintIdle;
   setTimeout(() => { if (!onCall) statusEl.textContent = '\u00a0'; }, 2500);
 }
 
 callBtn.addEventListener('click', () => { onCall ? endCall() : startCall(); });
+applyLang();
 </script>
 </body>
 </html>
