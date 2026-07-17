@@ -51,6 +51,7 @@
   .bub.mia{align-self:flex-start;background:var(--plate);border:1px solid var(--plate-edge);border-bottom-left-radius:5px}
   .bub.typing{color:var(--ink-dim);font-style:italic}
   .bubcards{align-self:flex-start;display:flex;gap:8px;flex-wrap:wrap}
+  .bubcards.user{align-self:flex-end}
   #chatAttach{display:flex;gap:8px;flex-wrap:wrap;margin:4px 0}
   #chatRow{display:flex;gap:8px;align-items:center}
   #chatRow button{
@@ -174,12 +175,13 @@
   /* ---- setup overlay ---- */
   #setup{
     position:fixed;inset:0;background:rgba(8,12,26,.92);backdrop-filter:blur(6px);
-    display:flex;align-items:center;justify-content:center;padding:20px;z-index:10;
+    display:flex;align-items:flex-start;justify-content:center;padding:20px;z-index:10;
+    overflow-y:auto;
   }
   #setup.hidden{display:none}
   .card{
     background:var(--plate);border:1px solid var(--plate-edge);border-radius:20px;
-    padding:26px 22px;max-width:400px;width:100%;
+    padding:26px 22px;max-width:400px;width:100%;margin:auto 0 20px;
   }
   .card h2{font-size:18px;margin-bottom:6px}
   .card p{font-size:13px;color:var(--ink-dim);line-height:1.55;margin-bottom:16px}
@@ -248,14 +250,9 @@
 <!-- first-run key setup -->
 <div id="setup" class="hidden">
   <div class="card">
-    <h2>Connect Mia's brain &amp; voice</h2>
-    <p>
-      Paste your two free API keys. They are saved only in this browser
-      (localStorage) and sent only to Google and ElevenLabs.<br><br>
-      • Gemini key: <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a><br>
-      • ElevenLabs key: <a href="https://elevenlabs.io" target="_blank" rel="noopener">elevenlabs.io</a> → profile → API Keys
-    </p>
-    <label for="langSel">Language / Språk</label>
+    <h2 id="suTitle">Connect Mia's brain &amp; voice</h2>
+    <p id="suDesc"></p>
+    <label for="langSel" id="suLang">Language</label>
     <select id="langSel">
       <option value="en">English</option>
       <option value="sv">Svenska</option>
@@ -266,9 +263,9 @@
     <input id="elKey" type="password" placeholder="sk_..." autocomplete="off">
     <button id="saveKeys">Save &amp; continue</button>
     <div id="setupErr"></div>
-    <label>Conversation log / Konversationslogg</label>
+    <label id="suLog">Conversation log</label>
     <div id="logBox"></div>
-    <button id="clearLog">Clear log &amp; memory / Rensa logg &amp; minne</button>
+    <button id="clearLog">Clear log &amp; memory</button>
   </div>
 </div>
 
@@ -303,6 +300,11 @@ const I18N = {
     unsupported:'Unsupported file type. Use images, PDF or text files.',
     madeFile:"Done — here's your file.", madeImage:'Done — your image is coming up.',
     imgFail:'Image generation failed.',
+    suTitle:"Connect Mia's brain & voice",
+    suDesc:'Paste your two free API keys. They are saved only in this browser (localStorage) and sent only to Google and ElevenLabs.<br><br>• Gemini key: <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a><br>• ElevenLabs key: <a href="https://elevenlabs.io" target="_blank" rel="noopener">elevenlabs.io</a> → profile → API Keys',
+    suLang:'Language', suSave:'Save & continue', suBoth:'Both keys are required.',
+    suLog:'Conversation log', suClear:'Clear log & memory', suEmpty:'(empty)',
+    lYou:'You', lMia:'Mia', lMade:'Mia made: ', lAtt:'You attached: ',
     speakRule:' Always answer in English.'
   },
   sv: {
@@ -322,6 +324,11 @@ const I18N = {
     unsupported:'Filtypen stöds inte. Använd bilder, PDF eller textfiler.',
     madeFile:'Klart — här är din fil.', madeImage:'Klart — din bild kommer strax.',
     imgFail:'Bildgenereringen misslyckades.',
+    suTitle:'Anslut Mias hjärna & röst',
+    suDesc:'Klistra in dina två gratis API-nycklar. De sparas bara i den här webbläsaren (localStorage) och skickas bara till Google och ElevenLabs.<br><br>• Gemini-nyckel: <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a><br>• ElevenLabs-nyckel: <a href="https://elevenlabs.io" target="_blank" rel="noopener">elevenlabs.io</a> → profil → API Keys',
+    suLang:'Språk', suSave:'Spara & fortsätt', suBoth:'Båda nycklarna krävs.',
+    suLog:'Konversationslogg', suClear:'Rensa logg & minne', suEmpty:'(tom)',
+    lYou:'Du', lMia:'Mia', lMade:'Mia skapade: ', lAtt:'Du bifogade: ',
     speakRule:' Svara alltid på svenska.'
   }
 };
@@ -330,6 +337,12 @@ const SYSTEM_PROMPT = () => SYSTEM_PROMPT_BASE + GEN_RULES + T().speakRule;
 function applyLang(){
   document.querySelector('header .sub').textContent = T().sub;
   document.getElementById('chatInput').placeholder = LANG === 'sv' ? 'Skriv till Mia…' : 'Write to Mia…';
+  document.getElementById('suTitle').textContent = T().suTitle;
+  document.getElementById('suDesc').innerHTML = T().suDesc;
+  document.getElementById('suLang').textContent = T().suLang;
+  document.getElementById('saveKeys').textContent = T().suSave;
+  document.getElementById('suLog').textContent = T().suLog;
+  document.getElementById('clearLog').textContent = T().suClear;
   if (!onCall) hintEl.textContent = T().hintIdle;
 }
 
@@ -383,9 +396,13 @@ function showSetup(){
   setupEl.classList.remove('hidden');
 }
 document.getElementById('gear').addEventListener('click', showSetup);
+document.getElementById('langSel').addEventListener('change', (e) => {
+  LANG = e.target.value; localStorage.setItem('mia_lang', LANG);
+  applyLang(); renderLog();
+});
 document.getElementById('saveKeys').addEventListener('click', () => {
   const g = gemInput.value.trim(), e = elInput.value.trim();
-  if (!g || !e){ document.getElementById('setupErr').textContent = 'Both keys are required.'; return; }
+  if (!g || !e){ document.getElementById('setupErr').textContent = T().suBoth; return; }
   GEMINI_KEY = g; EL_KEY = e;
   localStorage.setItem('mia_gemini_key', g);
   localStorage.setItem('mia_el_key', e);
@@ -454,6 +471,13 @@ function logGen(kind, name, blob){
   saveLog();
   return id;
 }
+function logAttach(kind, name, blob){
+  const id = 'a' + Date.now() + Math.random().toString(36).slice(2, 7);
+  idb.put(id, blob).catch(() => {});
+  convLog.push({ t:'att', kind, name, blobId:id, time: Date.now() });
+  saveLog();
+  return id;
+}
 
 function loadHistory(){
   try { return JSON.parse(localStorage.getItem('mia_history') || '[]'); } catch(e){ return []; }
@@ -465,7 +489,7 @@ function saveHistory(){
 function renderLog(){
   const box = document.getElementById('logBox');
   box.innerHTML = '';
-  if (!convLog.length){ box.textContent = '(empty / tom)'; return; }
+  if (!convLog.length){ box.textContent = T().suEmpty; return; }
   for (const e of convLog){
     const div = document.createElement('div');
     div.className = 'litem';
@@ -473,7 +497,7 @@ function renderLog(){
     if (e.t === 'msg'){
       const role = document.createElement('span');
       role.className = 'lrole';
-      role.textContent = (e.role === 'user' ? 'You' : 'Mia') + ': ';
+      role.textContent = (e.role === 'user' ? T().lYou : T().lMia) + ': ';
       div.appendChild(role);
       div.appendChild(document.createTextNode(e.text + ' '));
       const ts = document.createElement('span');
@@ -481,7 +505,8 @@ function renderLog(){
       div.appendChild(ts);
     } else {
       const role = document.createElement('span');
-      role.className = 'lrole'; role.textContent = 'Mia made: ';
+      role.className = 'lrole';
+      role.textContent = e.t === 'att' ? T().lAtt : T().lMade;
       div.appendChild(role);
       if (e.kind === 'image'){
         const img = document.createElement('img');
@@ -733,19 +758,20 @@ fileInput.addEventListener('change', async () => {
   if (f.size > 10*1024*1024){ hintEl.textContent = T().tooBig; return; }
   try {
     if (f.type.startsWith('image/')){
-      attachment = { kind:'image', mime:'image/jpeg', dataB64: await imageToB64(f), name:f.name };
+      attachment = { kind:'image', mime:'image/jpeg', dataB64: await imageToB64(f), name:f.name, file:f };
       addAttachmentCard(f.name, URL.createObjectURL(f));
     } else if (f.type === 'application/pdf' || /\.pdf$/i.test(f.name)){
-      attachment = { kind:'pdf', mime:'application/pdf', dataB64: await fileToB64(f), name:f.name };
+      attachment = { kind:'pdf', mime:'application/pdf', dataB64: await fileToB64(f), name:f.name, file:f };
       addAttachmentCard(f.name, null);
     } else if (f.type.startsWith('text/') || /\.(txt|md|csv|json|html)$/i.test(f.name)){
       let text = await f.text();
       if (text.length > 100000) text = text.slice(0, 100000);
-      attachment = { kind:'text', text, name:f.name };
+      attachment = { kind:'text', text, name:f.name, file:f };
       addAttachmentCard(f.name, null);
     } else {
       hintEl.textContent = T().unsupported; return;
     }
+    logAttach(attachment.kind === 'image' ? 'image' : 'file', f.name, f);
     hintEl.textContent = T().attached;
   } catch(e){ hintEl.textContent = '⚠ ' + e.message; }
 });
@@ -816,9 +842,13 @@ function addResultCard({ name, blob, thumbURL, pending, kind }, container){
     card.querySelector('.fname').textContent = name;
     const a = card.querySelector('a.dl');
     a.href = url; a.download = name;
-    a.addEventListener('click', () => {
-      setTimeout(() => { card.remove(); URL.revokeObjectURL(url); refreshAttachBtnVisibility(); }, 800);
-    });
+    if (container === attachArea){
+      // under the face: card makes way for the attach button after download
+      a.addEventListener('click', () => {
+        setTimeout(() => { card.remove(); URL.revokeObjectURL(url); refreshAttachBtnVisibility(); }, 800);
+      });
+    }
+    // in chat: card stays with a working download link
   }
   container.appendChild(card);
   refreshAttachBtnVisibility();
@@ -1231,6 +1261,23 @@ async function sendChat(){
   if (!GEMINI_KEY){ showSetup(); return; }
   chatInput.value = '';
   chatBusy = true;
+  if (attachment && attachment.file){
+    // keep the attachment visible in the chat with a working download link
+    const holder = document.createElement('div');
+    holder.className = 'bubcards user';
+    const url = URL.createObjectURL(attachment.file);
+    const card = document.createElement('div');
+    card.className = 'fcard';
+    card.innerHTML =
+      (attachment.kind === 'image' ? `<img src="${url}" alt="">` : '') +
+      `<div><div class="fname"></div><div class="fsub">📎</div></div>
+       <a class="dl" download>⬇</a>`;
+    card.querySelector('.fname').textContent = attachment.name;
+    const a = card.querySelector('a.dl');
+    a.href = url; a.download = attachment.name;
+    holder.appendChild(card);
+    chatMsgs.appendChild(holder);
+  }
   addBubble('user', text);
   logMsg('user', text);
   const typing = addBubble('mia typing', '…');
