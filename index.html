@@ -392,8 +392,8 @@ function showSetup(){
   gemInput.value = GEMINI_KEY; elInput.value = EL_KEY;
   document.getElementById('langSel').value = LANG;
   document.getElementById('setupErr').textContent = '';
+  setupEl.classList.remove('hidden');   // must be visible before scrolling works
   renderLog();
-  setupEl.classList.remove('hidden');
 }
 document.getElementById('gear').addEventListener('click', showSetup);
 document.getElementById('langSel').addEventListener('change', (e) => {
@@ -510,7 +510,9 @@ function renderLog(){
       div.appendChild(role);
       if (e.kind === 'image'){
         const img = document.createElement('img');
-        idb.get(e.blobId).then(b => { if (b) img.src = URL.createObjectURL(b); });
+        idb.get(e.blobId).then(b => {
+          if (b){ img.src = URL.createObjectURL(b); img.onload = () => { box.scrollTop = box.scrollHeight; }; }
+        });
         div.appendChild(img);
       }
       const a = document.createElement('a');
@@ -533,6 +535,7 @@ function renderLog(){
     box.appendChild(div);
   }
   box.scrollTop = box.scrollHeight;
+  requestAnimationFrame(() => { box.scrollTop = box.scrollHeight; });
 }
 document.getElementById('clearLog').addEventListener('click', () => {
   convLog = []; saveLog();
@@ -1232,6 +1235,37 @@ function chatCardHolder(){
   return w;
 }
 
+function addSavedCard(entry){
+  // rebuild a file/image card from the persistent log (blob in IndexedDB)
+  const holder = document.createElement('div');
+  holder.className = 'bubcards' + (entry.t === 'att' ? ' user' : '');
+  const card = document.createElement('div');
+  card.className = 'fcard';
+  card.innerHTML =
+    (entry.kind === 'image' ? `<img alt="">` : '') +
+    `<div><div class="fname"></div>` + (entry.t === 'att' ? `<div class="fsub">📎</div>` : '') + `</div>
+     <a class="dl" href="#" download>⬇</a>`;
+  card.querySelector('.fname').textContent = entry.name;
+  if (entry.kind === 'image'){
+    const img = card.querySelector('img');
+    idb.get(entry.blobId).then(b => {
+      if (b){ img.src = URL.createObjectURL(b); img.onload = scrollChat; }
+      else img.remove();
+    });
+  }
+  card.querySelector('a.dl').addEventListener('click', async (ev) => {
+    ev.preventDefault();
+    const b = await idb.get(entry.blobId);
+    if (!b) return;
+    const url = URL.createObjectURL(b);
+    const tmp = document.createElement('a');
+    tmp.href = url; tmp.download = entry.name; tmp.click();
+    setTimeout(() => URL.revokeObjectURL(url), 3000);
+  });
+  holder.appendChild(card);
+  chatMsgs.appendChild(holder);
+}
+
 function toggleChat(){
   if (onCall) return;                      // chat only when not calling
   chatOpen = !chatOpen;
@@ -1239,10 +1273,11 @@ function toggleChat(){
   document.body.classList.toggle('chatmode', chatOpen);
   if (chatOpen){
     if (!chatMsgs.children.length){
-      // show recent remembered conversation
-      for (const h of history.slice(-12)){
-        const txt = h.parts?.[0]?.text || '';
-        if (txt && !txt.startsWith('(')) addBubble(h.role === 'user' ? 'user' : 'mia', txt);
+      // rebuild the recent conversation — messages, attachments and
+      // generated files/images — from the persistent log
+      for (const e of convLog.slice(-100)){
+        if (e.t === 'msg') addBubble(e.role === 'user' ? 'user' : 'mia', e.text);
+        else addSavedCard(e);
       }
     }
     chatInput.focus();
