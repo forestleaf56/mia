@@ -71,6 +71,31 @@
   @media (prefers-reduced-motion: reduce){ #callBtn{animation:none} }
   #hint{font-size:12px;color:var(--ink-dim);margin-top:14px;text-align:center;max-width:300px;line-height:1.5}
 
+  /* ---- button row & camera ---- */
+  #btnRow{display:flex;align-items:center;justify-content:center;gap:26px;width:100%}
+  #btnSpacer{width:56px;height:56px;display:none}  /* balances camBtn during calls */
+  body.oncall #btnSpacer{display:block}
+  #camBtn{
+    width:56px;height:56px;border-radius:50%;border:1px solid var(--plate-edge);
+    background:var(--plate);cursor:pointer;display:none;
+    align-items:center;justify-content:center;transition:background .25s,border-color .25s;
+  }
+  body.oncall #camBtn{display:flex}
+  #camBtn svg{width:26px;height:26px;fill:var(--ink-dim);transition:fill .25s}
+  body.camon #camBtn{background:#123a4d;border-color:var(--glow)}
+  body.camon #camBtn svg{fill:var(--glow)}
+  #camPreview{
+    position:fixed;left:14px;bottom:max(14px, env(safe-area-inset-bottom));
+    width:108px;height:144px;border-radius:14px;overflow:hidden;display:none;
+    border:2px solid rgba(125,227,255,.5);box-shadow:0 8px 22px rgba(0,0,0,.5);z-index:5;
+  }
+  body.camon #camPreview{display:block}
+  #camVideo{width:100%;height:100%;object-fit:cover}
+  #camFlip{
+    position:absolute;right:4px;bottom:4px;width:30px;height:30px;border-radius:50%;
+    border:none;background:rgba(10,16,32,.7);color:var(--glow);font-size:16px;cursor:pointer;
+  }
+
   /* ---- setup overlay ---- */
   #setup{
     position:fixed;inset:0;background:rgba(8,12,26,.92);backdrop-filter:blur(6px);
@@ -111,9 +136,20 @@
 </div>
 
 <div id="status">&nbsp;</div>
-<button id="callBtn" aria-label="Start call">
-  <svg viewBox="0 0 24 24"><path d="M6.6 10.8c1.4 2.8 3.8 5.1 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.3.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1C10.6 21 3 13.4 3 4c0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.2.2 2.4.6 3.6.1.3 0 .7-.2 1l-2.3 2.2z"/></svg>
-</button>
+<div id="btnRow">
+  <button id="camBtn" aria-label="Toggle camera eyes">
+    <svg viewBox="0 0 24 24"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg>
+  </button>
+  <button id="callBtn" aria-label="Start call">
+    <svg viewBox="0 0 24 24"><path d="M6.6 10.8c1.4 2.8 3.8 5.1 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.3.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1C10.6 21 3 13.4 3 4c0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.2.2 2.4.6 3.6.1.3 0 .7-.2 1l-2.3 2.2z"/></svg>
+  </button>
+  <div id="btnSpacer"></div>
+</div>
+
+<div id="camPreview">
+  <video id="camVideo" autoplay playsinline muted></video>
+  <button id="camFlip" aria-label="Flip camera">⟲</button>
+</div>
 <div id="hint">Tap to call Mia. Use Chrome or Edge with a microphone.</div>
 
 <!-- first-run key setup -->
@@ -162,6 +198,9 @@ const I18N = {
     glitch:"Sorry, my connection glitched. Say that again?",
     fallbackGreet:"Hey, it's Mia. What's up?",
     greetCue:'(The call just connected. Greet me briefly as if you picked up the phone.)',
+    camOn:'Camera eyes on — ask Mia what she sees.', camOff:'Camera eyes off.',
+    camFail:'Camera not available — check permission.',
+    camCue:'(You are seeing through my camera right now. The attached image is your current live view — refer to it naturally when relevant.)',
     speakRule:' Always answer in English.'
   },
   sv: {
@@ -173,6 +212,9 @@ const I18N = {
     glitch:'Förlåt, min anslutning strulade. Kan du säga det igen?',
     fallbackGreet:'Hej, det är Mia. Läget?',
     greetCue:'(Samtalet kopplades precis. Hälsa kort som om du svarade i telefon.)',
+    camOn:'Kameraögon på — fråga Mia vad hon ser.', camOff:'Kameraögon av.',
+    camFail:'Kameran är inte tillgänglig — kontrollera behörigheten.',
+    camCue:'(Du ser genom min kamera just nu. Bilden som bifogas är din aktuella vy — hänvisa till den naturligt när det passar.)',
     speakRule:' Svara alltid på svenska.'
   }
 };
@@ -448,6 +490,55 @@ function startLipSyncFromAnalyser(){
   tick();
 }
 
+/* ---------------- camera "eyes" ---------------- */
+const camVideo = document.getElementById('camVideo');
+let camStream = null;
+let camFacing = 'environment';
+
+async function startCamera(){
+  stopCamera();
+  try {
+    camStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: camFacing, width: { ideal: 1024 } },
+      audio: false
+    });
+    camVideo.srcObject = camStream;
+    document.body.classList.add('camon');
+    hintEl.textContent = T().camOn;
+  } catch(e){
+    camStream = null;
+    document.body.classList.remove('camon');
+    hintEl.textContent = T().camFail;
+  }
+}
+
+function stopCamera(){
+  if (camStream){ camStream.getTracks().forEach(t => t.stop()); camStream = null; }
+  camVideo.srcObject = null;
+  document.body.classList.remove('camon');
+}
+
+function captureFrame(){
+  if (!camStream || !camVideo.videoWidth) return null;
+  const maxSide = 768;
+  const scale = Math.min(1, maxSide / Math.max(camVideo.videoWidth, camVideo.videoHeight));
+  const c = document.createElement('canvas');
+  c.width = Math.round(camVideo.videoWidth * scale);
+  c.height = Math.round(camVideo.videoHeight * scale);
+  c.getContext('2d').drawImage(camVideo, 0, 0, c.width, c.height);
+  return c.toDataURL('image/jpeg', 0.8).split(',')[1];   // raw base64
+}
+
+document.getElementById('camBtn').addEventListener('click', () => {
+  if (camStream){ stopCamera(); hintEl.textContent = T().camOff; }
+  else startCamera();
+});
+document.getElementById('camFlip').addEventListener('click', (e) => {
+  e.stopPropagation();
+  camFacing = camFacing === 'environment' ? 'user' : 'environment';
+  if (camStream) startCamera();
+});
+
 /* ---------------- speech recognition ---------------- */
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 
@@ -540,15 +631,28 @@ async function tryModel(model, contents){
   }
 }
 
-async function askMia(userText){
+async function askMia(userText, imageB64){
+  // History stores text only (images are heavy); the live frame is
+  // attached just to the outgoing request for the current turn.
   history.push({ role:'user', parts:[{ text:userText }] });
   if (history.length > 24) history = history.slice(-24);
+
+  let contents = history;
+  if (imageB64){
+    contents = history.slice(0, -1).concat([{
+      role:'user',
+      parts:[
+        { text: T().camCue + ' ' + userText },
+        { inline_data: { mime_type:'image/jpeg', data: imageB64 } }
+      ]
+    }]);
+  }
 
   const models = geminiModel ? [geminiModel, ...GEMINI_MODELS.filter(m => m !== geminiModel)] : GEMINI_MODELS;
   let lastErr = null;
   for (const m of models){
     try {
-      const reply = await tryModel(m, history);
+      const reply = await tryModel(m, contents);
       if (m !== geminiModel){ geminiModel = m; localStorage.setItem('mia_gem_model', m); }
       history.push({ role:'model', parts:[{ text:reply }] });
       return reply;
@@ -666,8 +770,9 @@ function speakFallback(text, expr){
 async function handleUserSpeech(text){
   stopListening();
   setState(S.THINKING, T().thinking);
+  const frame = camStream ? captureFrame() : null;
   try {
-    const reply = await askMia(text);
+    const reply = await askMia(text, frame);
     if (!onCall) return;
     await speak(reply);
   } catch(e){
@@ -719,6 +824,7 @@ async function startCall(){
 function endCall(msg){
   onCall = false;
   stopListening();
+  stopCamera();
   if (currentAudio){ try{ currentAudio.pause(); }catch(e){} currentAudio = null; }
   if ('speechSynthesis' in window) speechSynthesis.cancel();
   document.body.classList.remove('oncall');
