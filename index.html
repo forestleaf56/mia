@@ -467,8 +467,8 @@ function saveLog(){
     try { localStorage.setItem('mia_log', JSON.stringify(convLog)); } catch(e2){}
   }
 }
-function logMsg(role, text){
-  convLog.push({ t:'msg', role, text, time: Date.now() });
+function logMsg(role, text, searched){
+  convLog.push({ t:'msg', role, text, searched: !!searched, time: Date.now() });
   saveLog();
 }
 function logGen(kind, name, blob){
@@ -1347,11 +1347,20 @@ function toggleChat(){
   chatEl.classList.toggle('hidden', !chatOpen);
   document.body.classList.toggle('chatmode', chatOpen);
   if (chatOpen){
-    if (!chatMsgs.children.length){
-      // rebuild the recent conversation — messages, attachments and
-      // generated files/images — from the persistent log
+    {
+      // always rebuild from the persistent log so anything said during a
+      // voice call (and its 🔎 marker) also shows up here
+      chatMsgs.innerHTML = '';
       for (const e of convLog.slice(-100)){
-        if (e.t === 'msg') addBubble(e.role === 'user' ? 'user' : 'mia', e.text);
+        if (e.t === 'msg'){
+          addBubble(e.role === 'user' ? 'user' : 'mia', e.text);
+          if (e.searched){
+            const badge = document.createElement('div');
+            badge.className = 'bub mia typing';
+            badge.textContent = '🔎 Google';
+            chatMsgs.appendChild(badge);
+          }
+        }
         else addSavedCard(e);
       }
     }
@@ -1408,7 +1417,7 @@ async function sendChat(){
       chatMsgs.appendChild(badge);
       scrollChat();
     }
-    logMsg('model', spoken);
+    logMsg('model', spoken, lastGrounded);
     // attachment was consumed by this turn
     attachment = null; clearAttachmentCard();
   } catch(e){
@@ -1437,7 +1446,7 @@ async function handleUserSpeech(text){
     if (history.length && history[history.length-1].role === 'model')
       history[history.length-1] = { role:'model', parts:[{ text: spoken }] };
     saveHistory();
-    logMsg('model', spoken);
+    logMsg('model', spoken, lastGrounded);
     await speak(spoken);
   } catch(e){
     if (!onCall) return;
