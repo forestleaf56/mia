@@ -333,7 +333,14 @@ const I18N = {
   }
 };
 const T = () => I18N[LANG];
-const SYSTEM_PROMPT = () => SYSTEM_PROMPT_BASE + GEN_RULES + T().speakRule;
+const SEARCH_ON = true;   // Google Search grounding, with automatic fallback
+const SEARCH_RULE = " You can search the web. To search, reply with ONLY a marker like [[SEARCH: your search words]] and nothing else — you will immediately be given the results and can then answer. Use it whenever a question involves current events, news, prices, dates, results, or anything that may have changed recently. Never claim you looked something up unless you actually received search results. Never guess today's date from memory. Keep answers short and spoken-friendly.";
+const dateLine = () => {
+  const d = new Date();
+  return " The current date and time right now is " + d.toLocaleString('en-GB', { weekday:'long', year:'numeric', month:'long', day:'numeric', hour:'2-digit', minute:'2-digit' }) +
+         ". Your training data is older than this, so treat anything after your training as unknown unless you search. Trust this date over your own assumptions.";
+};
+const SYSTEM_PROMPT = () => SYSTEM_PROMPT_BASE + GEN_RULES + SEARCH_RULE + dateLine() + T().speakRule;
 function applyLang(){
   document.querySelector('header .sub').textContent = T().sub;
   document.getElementById('chatInput').placeholder = LANG === 'sv' ? 'Skriv till Mia…' : 'Write to Mia…';
@@ -862,6 +869,7 @@ function addResultCard({ name, blob, thumbURL, pending, kind }, container){
 /* parse [[FILE:...]]...[[/FILE]] and [[IMAGE:...]] out of Mia's reply */
 function processReply(reply, container){
   let spoken = reply;
+  spoken = spoken.replace(/\[\[SEARCH:[^\]]*\]\]/ig, ' ');   // never show/speak a search marker
   const files = [];
   spoken = spoken.replace(/\[\[FILE:([^\]]+)\]\]([\s\S]*?)\[\[\/FILE\]\]/g, (m, fname, content) => {
     files.push({ name: fname.trim(), content: content.trim() });
@@ -1024,19 +1032,21 @@ function stopListening(){
 }
 
 /* ---------------- LLM: Gemini ---------------- */
-async function geminiRequest(model, contents, disableThinking){
+async function geminiRequest(model, contents, disableThinking, useSearch){
   const generationConfig = { temperature: 1.0, maxOutputTokens: 1024 };
   if (disableThinking) generationConfig.thinkingConfig = { thinkingBudget: 0 };
+  const payload = {
+    system_instruction: { parts: [{ text: SYSTEM_PROMPT() }] },
+    contents,
+    generationConfig
+  };
+  if (useSearch) payload.tools = [{ google_search: {} }];
   const res = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`,
     {
       method:'POST',
       headers:{ 'Content-Type':'application/json' },
-      body: JSON.stringify({
-        system_instruction: { parts: [{ text: SYSTEM_PROMPT() }] },
-        contents,
-        generationConfig
-      })
+      body: JSON.stringify(payload)
     }
   );
   if (!res.ok){
@@ -1047,6 +1057,7 @@ async function geminiRequest(model, contents, disableThinking){
     throw err;
   }
   const data = await res.json();
+  lastGrounded = !!data?.candidates?.[0]?.groundingMetadata;
   // Ignore internal "thought" parts; keep only real text.
   const text = (data?.candidates?.[0]?.content?.parts || [])
     .filter(p => !p.thought && p.text)
@@ -1058,18 +1069,82 @@ async function geminiRequest(model, contents, disableThinking){
   return text;
 }
 
+let lastGrounded = false;   // true when the answer actually used Google Search
+let lastSearchError = '';   // why native grounding failed, for diagnostics
+
+/* Free, keyless, CORS-friendly web search used when Gemini's own
+   Google Search grounding isn't available for this key. */
+async function webSearch(query){
+  const target = 'https://duckduckgo.com/html/?q=' + encodeURIComponent(query);
+  const res = await fetch('https://r.jina.ai/' + target, { headers:{ 'Accept':'text/plain' } });
+  if (!res.ok) throw new Error('search HTTP ' + res.status);
+  let text = await res.text();
+  text = text.replace(/\n{3,}/g, '\n\n').trim();
+  return text.slice(0, 6000);
+}
+
 async function tryModel(model, contents){
+  // Optional Google Search grounding. Gemini 2.5 often rejects the search tool
+  // when thinking is disabled, so if the fast variant fails we try once more
+  // with thinking enabled before falling back to a plain (unsearched) request.
+  if (SEARCH_ON){
+    try {
+      return await geminiRequest(model, contents, true, true);
+    } catch(e){
+      console.warn('search (fast) failed:', e.status, e.message);
+      if (e.status === 401 || e.status === 403) throw e;
+      try {
+        return await geminiRequest(model, contents, false, true);
+      } catch(e2){
+        console.warn('search (thinking) failed:', e2.status, e2.message);
+        if (e2.status === 401 || e2.status === 403) throw e2;
+        lastSearchError = e2.message || e.message || '';
+      }
+    }
+  }
   // First try with thinking disabled (fastest). If the model rejects
   // thinkingConfig (400), retry once without it.
   try {
-    return await geminiRequest(model, contents, true);
+    return await geminiRequest(model, contents, true, false);
   } catch(e){
-    if (e.status === 400) return await geminiRequest(model, contents, false);
+    if (e.status === 400) return await geminiRequest(model, contents, false, false);
     throw e;
   }
 }
 
 async function askMia(userText, imageB64){
+  const reply = await askMiaOnce(userText, imageB64);
+  // Did Mia ask to search? Run it for real and let her answer from the results.
+  const m = reply.match(/\[\[SEARCH:([^\]]*)\]\]/i);
+  if (!m) return reply;
+  const query = m[1].trim();
+  if (!query) return reply.replace(/\[\[SEARCH:[^\]]*\]\]/ig, '').trim();
+  try {
+    const results = await webSearch(query);
+    // remove the marker turn from memory so it doesn't confuse later turns
+    if (history.length && history[history.length-1].role === 'model') history.pop();
+    const idx = history.length;
+    const answer = await askMiaOnce(
+      '(Web search results for "' + query + '":\n' + results +
+      '\nAnswer my previous question using these results. Be brief and spoken-friendly. Do not use the search marker again.)'
+    );
+    // drop the bulky results turn from memory, keep only Mia's answer
+    history.splice(idx, 1);
+    saveHistory();
+    lastGrounded = true;
+    return answer;
+  } catch(e){
+    console.warn('web search failed:', e.message);
+    if (history.length && history[history.length-1].role === 'model') history.pop();
+    const idx = history.length;
+    const answer = await askMiaOnce('(The web search failed. Tell me briefly that you could not check right now, and do not use the search marker again.)');
+    history.splice(idx, 1);
+    saveHistory();
+    return answer;
+  }
+}
+
+async function askMiaOnce(userText, imageB64){
   // History stores text only (images are heavy); the live frame is
   // attached just to the outgoing request for the current turn.
   history.push({ role:'user', parts:[{ text:userText }] });
@@ -1326,6 +1401,13 @@ async function sendChat(){
       history[history.length-1] = { role:'model', parts:[{ text: spoken }] };
     saveHistory();
     addBubble('mia', spoken);
+    if (lastGrounded){
+      const badge = document.createElement('div');
+      badge.className = 'bub mia typing';
+      badge.textContent = '🔎 Google';
+      chatMsgs.appendChild(badge);
+      scrollChat();
+    }
     logMsg('model', spoken);
     // attachment was consumed by this turn
     attachment = null; clearAttachmentCard();
